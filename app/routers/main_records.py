@@ -25,6 +25,7 @@ def create_record(payload: schemas.MainCreate, db: Session = Depends(get_db)):
     if dup:
         raise HTTPException(status_code=409, detail="Record already exists for this (corpus, street, house_num)")
     obj = models.MainRecord(
+        id=payload.id,
         corpus_id=payload.corpus_id,
         street=payload.street,
         house_num=payload.house_num,
@@ -199,3 +200,83 @@ def bulk_status_change(
     db.commit()
 
     return {"updated": result.rowcount, "status": payload.status, "city_id": city_id, "corpus_id": corpus_id}
+
+
+@router.post("/create-with-names", response_model=schemas.MainWithNamesOut)
+def create_with_names(
+    payload: schemas.MainCreateByNamesIn = Body(...),
+    db: Session = Depends(get_db)
+):
+    # 1) Город
+    city_id = payload.city_id
+    if not city_id:
+        if not payload.city_name:
+            raise HTTPException(status_code=400, detail="Provide city_id or city_name")
+        city = db.scalar(select(models.City).where(models.City.name == payload.city_name))
+        if not city:
+            city = models.City(name=payload.city_name)
+            db.add(city)
+            db.flush()  # получаем id без полного commit
+        city_id = city.id
+
+    # 2) Корпус (привязан к городу)
+    corpus_id = payload.corpus_id
+    if not corpus_id:
+        if not payload.corpus_name:
+            raise HTTPException(status_code=400, detail="Provide corpus_id or corpus_name")
+        corpus = db.scalar(
+            select(models.Corpus).where(
+                and_(models.Corpus.city_id == city_id, models.Corpus.name == payload.corpus_name)
+            )
+        )
+        if not corpus:
+            corpus = models.Corpus(city_id=city_id, name=payload.corpus_name)
+            db.add(corpus)
+            db.flush()
+        corpus_id = corpus.id
+    else:
+        corpus = db.get(models.Corpus, corpus_id)
+        if not corpus or corpus.city_id != city_id:
+            raise HTTPException(status_code=400, detail="Corpus does not belong to the specified city")
+
+    # 3) Проверка уникальности main
+    dup = db.scalar(
+        select(models.MainRecord).where(
+            and_(
+                models.MainRecord.corpus_id == corpus_id,
+                models.MainRecord.street == payload.street,
+                models.MainRecord.house_num.is_(payload.house_num) if payload.house_num is None
+                else models.MainRecord.house_num == payload.house_num
+            )
+        )
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Record already exists for this (corpus, street, house_num)")
+
+    # 4) Создание main (c опциональным id)
+    obj = models.MainRecord(
+        id=payload.id,  # может быть None, тогда SERIAL
+        corpus_id=corpus_id,
+        street=payload.street,
+        house_num=payload.house_num,
+        status=True if payload.status is None else payload.status
+    )
+    db.add(obj)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="ID already exists or unique constraint violated")
+    db.refresh(obj)
+
+    # 5) Вернём с названиями
+    city_name = db.scalar(select(models.City.name).where(models.City.id == city_id))
+    corpus_name = db.scalar(select(models.Corpus.name).where(models.Corpus.id == corpus_id))
+    return schemas.MainWithNamesOut(
+        id=obj.id,
+        city_name=city_name,
+        corpus_name=corpus_name,
+        street=obj.street,
+        house_num=obj.house_num,
+        status=obj.status,
+    )

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, constr
+from pydantic import BaseModel, Field, conint, constr
 from typing import List, Optional
 
 # Cities
@@ -76,3 +76,17 @@ class BulkStatusIn(BaseModel):
     corpus_id: Optional[int] = None
     city_name: Optional[str] = None
     corpus_name: Optional[str] = None
+
+
+class MainCreateByNamesIn(BaseModel):
+    id: conint(gt=0) = Field(..., description="ID обязателен (целое > 0)")
+    # один из пары (city_id | city_name)
+    city_id: Optional[int] = None
+    city_name: Optional[constr(strip_whitespace=True, min_length=1, max_length=255)] = None
+    # один из пары (corpus_id | corpus_name)
+    corpus_id: Optional[int] = None
+    corpus_name: Optional[constr(strip_whitespace=True, min_length=1, max_length=255)] = None
+
+    street: constr(strip_whitespace=True, min_length=1, max_length=255)
+    house_num: Optional[constr(strip_whitespace=True, max_length=64)] = None
+    status: Optional[bool] = True

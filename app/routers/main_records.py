@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, update, func, asc, desc, text
 from ..db import get_db
 from .. import models, schemas
 
@@ -56,13 +56,20 @@ def list_records(
     rows = db.scalars(stmt.offset(skip).limit(limit)).all()
     return rows
 
-@router.get("/with-names", response_model=list[schemas.MainWithNamesOut])
+@router.get("/with-names", response_model=schemas.PageMainWithNames)
 def list_records_with_names(
-    skip: int = 0,
-    limit: int = Query(1000, ge=1, le=10000),
+    city_id: int | None = None,
+    corpus_id: int | None = None,
+    status: bool | None = None,
+    street: str | None = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=200),
+    sort_by: str = Query("id", pattern="^(id|city_name|corpus_name|street)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
-    stmt = (
+    # Базовый запрос с join'ами
+    base = (
         select(
             models.MainRecord.id,
             models.City.name.label("city_name"),
@@ -71,14 +78,50 @@ def list_records_with_names(
             models.MainRecord.house_num,
             models.MainRecord.status,
         )
-        .join(models.MainRecord.corpus)      # main -> corpuses
-        .join(models.Corpus.city)            # corpuses -> cities
-        .offset(skip)
-        .limit(limit)
+        .join(models.MainRecord.corpus)   # main -> corpuses
+        .join(models.Corpus.city)         # corpuses -> cities
     )
-    rows = db.execute(stmt).all()
-    # Row -> dict -> Pydantic
-    return [schemas.MainWithNamesOut(**r._mapping) for r in rows]
+
+    # Фильтры
+    if city_id:
+        base = base.where(models.Corpus.city_id == city_id)
+    if corpus_id:
+        base = base.where(models.Corpus.id == corpus_id)
+    if status is not None:
+        base = base.where(models.MainRecord.status == status)
+    if street:
+        base = base.where(models.MainRecord.street.ilike(f"%{street}%"))
+
+    # Сортировка (безопасный маппинг)
+    sort_map = {
+        "id": models.MainRecord.id,
+        "city_name": models.City.name,
+        "corpus_name": models.Corpus.name,
+        "street": models.MainRecord.street,
+    }
+    order_col = sort_map.get(sort_by, models.MainRecord.id)
+    base = base.order_by(asc(order_col) if sort_dir == "asc" else desc(order_col))
+
+    # Подсчёт total (второй лёгкий запрос)
+    count_stmt = (
+        select(func.count())
+        .select_from(models.MainRecord)
+        .join(models.MainRecord.corpus)
+        .join(models.Corpus.city)
+    )
+    if city_id:
+        count_stmt = count_stmt.where(models.Corpus.city_id == city_id)
+    if corpus_id:
+        count_stmt = count_stmt.where(models.Corpus.id == corpus_id)
+    if status is not None:
+        count_stmt = count_stmt.where(models.MainRecord.status == status)
+    if street:
+        count_stmt = count_stmt.where(models.MainRecord.street.ilike(f"%{street}%"))
+    total = db.scalar(count_stmt) or 0
+
+    rows = db.execute(base.offset(skip).limit(limit)).all()
+    items = [schemas.MainWithNamesOut(**r._mapping) for r in rows]
+    return {"items": items, "total": total}
 
 @router.get("/{record_id}", response_model=schemas.MainOut)
 def get_record(record_id: int, db: Session = Depends(get_db)):

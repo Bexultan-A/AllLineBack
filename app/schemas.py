@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, constr
-from typing import Optional
+from typing import List, Optional
 
 # Cities
 class CityBase(BaseModel):
@@ -62,7 +62,11 @@ class MainWithNamesOut(BaseModel):
     house_num: Optional[str] = None
     status: bool
     class Config:
-        from_attributes = True  
+        from_attributes = True 
+
+class PageMainWithNames(BaseModel):
+    items: List[MainWithNamesOut]
+    total: int 
 
 # Bulk status operation
 class BulkStatusIn(BaseModel):

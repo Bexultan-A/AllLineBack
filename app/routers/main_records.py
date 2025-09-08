@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, update, func, asc, desc, text
+import json, requests
+from sqlalchemy.exc import IntegrityError
 from ..db import get_db
 from .. import models, schemas
 
 router = APIRouter(prefix="/main", tags=["main"])
+
+EXTERNAL_URL = "http://185.13.20.2:8082/rest_api/v2/Homes/"
 
 # CRUD
 @router.post("", response_model=schemas.MainOut)
@@ -201,6 +205,16 @@ def bulk_status_change(
 
     return {"updated": result.rowcount, "status": payload.status, "city_id": city_id, "corpus_id": corpus_id}
 
+@router.patch("/{record_id}/status", response_model=schemas.MainOut, tags=["main"])
+def set_record_status(record_id: int, payload: schemas.StatusUpdateIn = Body(...), db: Session = Depends(get_db)):
+    obj = db.get(models.MainRecord, record_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Record not found")
+    obj.status = payload.status
+    db.commit()
+    db.refresh(obj)
+    return obj
+
 
 @router.post("/create-with-names", response_model=schemas.MainWithNamesOut)
 def create_with_names(
@@ -279,4 +293,136 @@ def create_with_names(
         street=obj.street,
         house_num=obj.house_num,
         status=obj.status,
+    )
+
+
+@router.post("/import-homes", response_model=schemas.ImportSummary, tags=["main"])
+def import_homes(payload: schemas.ImportHomesIn = Body(...), db: Session = Depends(get_db)):
+    db.execute(text("SET LOCAL statement_timeout = 15000"))
+
+    # 1) Внешний запрос: собираем фильтр только из переданных полей  # NEW
+    filt = {"connect_date__gte": payload.connect_date_gte.isoformat()}
+    if payload.city_name:   filt["city"]   = payload.city_name.strip()
+    if payload.corpus_name: filt["s_liter"] = payload.corpus_name.strip()
+
+    form = {
+        "method1": "objects.filter",
+        "arg1": json.dumps(filt, ensure_ascii=False),
+        "fields": json.dumps(["id","settlement","city","street","s_number","s_liter","connect_date"], ensure_ascii=False),
+    }
+    try:
+        resp = requests.post(EXTERNAL_URL, data=form, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"External API error: {e}")
+
+    results = data.get("result", []) or []
+    total_source = len(results)
+    imported = updated = unchanged = skipped = 0
+    warnings: list[str] = []
+
+    # Кэш соответствий (city_name, corpus_name) -> (city_id, corpus_id)  # NEW
+    cache: dict[tuple[str, str], tuple[int, int]] = {}
+
+    def get_or_create_city_corpus(city_name_in: str | None, corpus_name_in: str | None) -> tuple[int, int] | None:
+        """Вернёт (city_id, corpus_id) для пары названий; создаст при отсутствии."""
+        if not city_name_in or not corpus_name_in:
+            return None
+        key = (city_name_in, corpus_name_in)
+        if key in cache:
+            return cache[key]
+        # город
+        city = db.scalar(select(models.City).where(models.City.name == city_name_in))
+        if not city:
+            city = models.City(name=city_name_in)
+            db.add(city); db.flush()
+        # корпус
+        corpus = db.scalar(select(models.Corpus).where(
+            and_(models.Corpus.city_id == city.id, models.Corpus.name == corpus_name_in)
+        ))
+        if not corpus:
+            corpus = models.Corpus(city_id=city.id, name=corpus_name_in)
+            db.add(corpus); db.flush()
+        cache[key] = (city.id, corpus.id)
+        return cache[key]
+
+    for item in results:
+        f = (item or {}).get("fields", {}) or {}
+        ext_id = f.get("id") or item.get("pk")
+        if ext_id is None:
+            skipped += 1; warnings.append("Missing id in source record"); continue
+
+        street = (f.get("street") or "").strip()
+        if street == "":
+            skipped += 1; warnings.append(f"id={ext_id}: empty street"); continue  # CHECK(street<>'') защитим
+
+        house_num_raw = (f.get("s_number") or "").strip()
+        house_num = house_num_raw if house_num_raw != "" else None
+
+        # Определяем названия: из payload (если заданы) ИЛИ из самой записи  # NEW
+        city_name = (payload.city_name or f.get("city") or "").strip()
+        corpus_name = (payload.corpus_name or f.get("s_liter") or "").strip()
+        pair = get_or_create_city_corpus(city_name or None, corpus_name or None)
+        if not pair:
+            skipped += 1; warnings.append(f"id={ext_id}: no city/corpus in payload or source"); continue
+        city_id, corpus_id = pair
+
+        try:
+            obj = db.get(models.MainRecord, ext_id)
+            if obj:
+                changed = False
+                if obj.corpus_id != corpus_id:
+                    obj.corpus_id = corpus_id; changed = True
+                if obj.street != street:
+                    obj.street = street; changed = True
+                if obj.house_num != house_num:
+                    obj.house_num = house_num; changed = True
+                if changed: updated += 1
+                else: unchanged += 1
+            else:
+                # Проверка уникального (corpus_id, street, house_num)
+                dup = db.scalar(
+                    select(models.MainRecord).where(
+                        and_(
+                            models.MainRecord.corpus_id == corpus_id,
+                            models.MainRecord.street == street,
+                            models.MainRecord.house_num.is_(None) if house_num is None
+                            else models.MainRecord.house_num == house_num
+                        )
+                    )
+                )
+                if dup:
+                    try:
+                        dup.id = int(ext_id)   # «привяжем» внешний id
+                        updated += 1
+                    except Exception:
+                        skipped += 1
+                        warnings.append(f"id={ext_id}: duplicate by (corpus,street,house_num), cannot set id")
+                else:
+                    obj = models.MainRecord(
+                        id=int(ext_id),
+                        corpus_id=corpus_id,
+                        street=street,
+                        house_num=house_num,
+                        status=True,
+                    )
+                    db.add(obj); imported += 1
+        except IntegrityError:
+            db.rollback(); skipped += 1; warnings.append(f"id={ext_id}: integrity error")
+
+    db.commit()
+    # Можно вернуть city_id/corpus_id из payload (если были), иначе -1  # NEW
+    return schemas.ImportSummary(
+        total_source=total_source,
+        imported=imported,
+        updated=updated,
+        unchanged=unchanged,
+        skipped=skipped,
+        city_id=-1 if not payload.city_name else db.scalar(select(models.City.id).where(models.City.name == payload.city_name.strip())),
+        corpus_id=-1 if not payload.corpus_name else db.scalar(select(models.Corpus.id).join(models.City).where(
+            models.Corpus.name == payload.corpus_name.strip(),
+            models.City.name == payload.city_name.strip() if payload.city_name else True
+        )) or -1,
+        warnings=warnings[:20],
     )

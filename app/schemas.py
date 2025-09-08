@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field, conint, constr
+from datetime import date
 from typing import List, Optional
 
 # Cities
@@ -90,3 +91,24 @@ class MainCreateByNamesIn(BaseModel):
     street: constr(strip_whitespace=True, min_length=1, max_length=255)
     house_num: Optional[constr(strip_whitespace=True, max_length=64)] = None
     status: Optional[bool] = True
+
+
+class ImportHomesIn(BaseModel):
+    connect_date_gte: date
+    city_name: Optional[constr(strip_whitespace=True, min_length=1, max_length=255)] = None
+    corpus_name: Optional[constr(strip_whitespace=True, min_length=1, max_length=255)] = None
+
+
+class ImportSummary(BaseModel):
+    total_source: int
+    imported: int
+    updated: int
+    unchanged: int
+    skipped: int
+    city_id: int
+    corpus_id: int
+    warnings: List[str] = []
+
+
+class StatusUpdateIn(BaseModel):
+    status: bool

@@ -1,6 +1,7 @@
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, status
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_, update, func, asc, desc, text
+from sqlalchemy import case, select, and_, update, func, asc, desc, text
 import json, requests
 from sqlalchemy.exc import IntegrityError
 from ..db import get_db
@@ -456,3 +457,40 @@ def import_homes(payload: schemas.ImportHomesIn = Body(...), db: Session = Depen
         )) or -1,
         warnings=warnings[:20],
     )
+
+
+@router.get("/status-summary", response_model=list[schemas.CorpusStatusSummary])
+def corpus_status_summary(
+    city_id: int | None = None,
+    corpus_ids: Optional[List[int]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    # SELECT corpus_id, COUNT(*), SUM(CASE WHEN status THEN 1 ELSE 0 END)
+    stmt = select(
+        models.MainRecord.corpus_id.label("corpus_id"),
+        func.count().label("total"),
+        func.sum(case((models.MainRecord.status.is_(True), 1), else_=0)).label("enabled"),
+    )
+
+    if city_id:
+        # join через Corpus, чтобы отфильтровать по городу
+        stmt = stmt.join(models.Corpus, models.Corpus.id == models.MainRecord.corpus_id)\
+                   .where(models.Corpus.city_id == city_id)
+
+    if corpus_ids:
+        stmt = stmt.where(models.MainRecord.corpus_id.in_(corpus_ids))
+
+    stmt = stmt.group_by(models.MainRecord.corpus_id)
+    rows = db.execute(stmt).all()
+
+    out: list[schemas.CorpusStatusSummary] = []
+    for corpus_id, total, enabled in rows:
+        status = "mixed"
+        if total and enabled == total:
+            status = "true"
+        elif total and enabled == 0:
+            status = "false"
+        out.append(schemas.CorpusStatusSummary(
+            corpus_id=corpus_id, total=total, enabled=enabled or 0, status=status
+        ))
+    return out

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, conint, constr
 from datetime import date
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 # Cities
 class CityBase(BaseModel):
@@ -77,6 +77,12 @@ class BulkStatusIn(BaseModel):
     corpus_id: Optional[int] = None
     city_name: Optional[str] = None
     corpus_name: Optional[str] = None
+
+class CorpusStatusSummary(BaseModel):
+    corpus_id: int
+    total: int
+    enabled: int
+    status: Literal["true", "false", "mixed"]
 
 
 class MainCreateByNamesIn(BaseModel):

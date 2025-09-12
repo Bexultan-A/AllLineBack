@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, update, func, asc, desc, text
 import json, requests
@@ -127,6 +127,36 @@ def list_records_with_names(
     rows = db.execute(base.offset(skip).limit(limit)).all()
     items = [schemas.MainWithNamesOut(**r._mapping) for r in rows]
     return {"items": items, "total": total}
+
+@router.get("/with-names/{record_id}", response_model=schemas.MainWithNamesOut)
+def get_record_with_names(
+    record_id: int,
+    db: Session = Depends(get_db),
+):
+    stmt = (
+        select(
+            models.MainRecord.id,
+            models.City.name.label("city_name"),
+            models.Corpus.name.label("corpus_name"),
+            models.MainRecord.street,
+            models.MainRecord.house_num,
+            models.MainRecord.status,
+        )
+        .join(models.MainRecord.corpus)   # main -> corpuses
+        .join(models.Corpus.city)         # corpuses -> cities
+        .where(models.MainRecord.id == record_id)
+        .limit(1)
+    )
+
+    row = db.execute(stmt).first()
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Record {record_id} not found",
+        )
+
+    return schemas.MainWithNamesOut(**row._mapping)
+
 
 @router.get("/{record_id}", response_model=schemas.MainOut)
 def get_record(record_id: int, db: Session = Depends(get_db)):

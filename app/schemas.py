@@ -118,3 +118,16 @@ class ImportSummary(BaseModel):
 
 class StatusUpdateIn(BaseModel):
     status: bool
+
+
+StatusLabel = Literal["true", "false", "mixed"]  # true=все включены, false=все выключены, mixed=смешанный/нет записей
+
+class CorpusStatusOut(BaseModel):
+    city_id: int
+    city_name: str
+    corpus_id: int
+    corpus_name: str
+    status: StatusLabel
+    total: int
+    true_cnt: int
+    false_cnt: int

@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import asc, case, desc, func, select, and_
+from sqlalchemy import asc, case, delete, desc, func, select, and_
 from ..db import get_db
 from .. import models, schemas
 
@@ -119,6 +119,17 @@ def get_corpus(corpus_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Corpus not found")
     return obj
 
+@router.get("/{corpus_id}/usage", response_model=schemas.CorpusUsage)
+def corpus_usage(corpus_id: int, db: Session = Depends(get_db)):
+    c = db.get(models.Corpus, corpus_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Corpus not found")
+    mains_cnt = db.scalar(select(func.count()).select_from(models.MainRecord).where(models.MainRecord.corpus_id == corpus_id)) or 0
+    city = db.get(models.City, c.city_id)
+    return schemas.CorpusUsage(
+        corpus_id=c.id, corpus_name=c.name, city_id=c.city_id, city_name=city.name if city else "-", mains=mains_cnt
+    )
+
 @router.put("/{corpus_id}", response_model=schemas.CorpusOut)
 def update_corpus(corpus_id: int, payload: schemas.CorpusUpdate, db: Session = Depends(get_db)):
     obj = db.get(models.Corpus, corpus_id)
@@ -141,8 +152,20 @@ def update_corpus(corpus_id: int, payload: schemas.CorpusUpdate, db: Session = D
     return obj
 
 @router.delete("/{corpus_id}", status_code=204)
-def delete_corpus(corpus_id: int, db: Session = Depends(get_db)):
-    obj = db.get(models.Corpus, corpus_id)
-    if not obj:
+def delete_corpus(corpus_id: int, force: bool = Query(False), db: Session = Depends(get_db)):
+    c = db.get(models.Corpus, corpus_id)
+    if not c:
         return
-    db.delete(obj); db.commit()
+    mains_cnt = db.scalar(select(func.count()).select_from(models.MainRecord).where(models.MainRecord.corpus_id == corpus_id)) or 0
+    if mains_cnt > 0 and not force:
+        raise HTTPException(status_code=409, detail="Corpus has main records; use force=true to cascade")
+
+    if force and mains_cnt > 0:
+        db.execute(
+            delete(models.MainRecord)
+            .where(models.MainRecord.corpus_id == corpus_id)
+            .execution_options(synchronize_session=False)
+        )
+
+    db.delete(c)
+    db.commit()

@@ -131,3 +131,17 @@ class CorpusStatusOut(BaseModel):
     total: int
     true_cnt: int
     false_cnt: int
+
+
+class CityUsage(BaseModel):
+    city_id: int
+    city_name: str
+    corpuses: int
+    mains: int
+
+class CorpusUsage(BaseModel):
+    corpus_id: int
+    corpus_name: str
+    city_id: int
+    city_name: str
+    mains: int

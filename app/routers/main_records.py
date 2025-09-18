@@ -6,6 +6,8 @@ import json, requests, logging
 from sqlalchemy.exc import IntegrityError
 from ..db import get_db
 from .. import models, schemas
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 router = APIRouter(prefix="/main", tags=["main"])
 
@@ -331,7 +333,7 @@ def create_with_names(
 
 @router.post("/import-homes", response_model=schemas.ImportSummary, tags=["main"])
 def import_homes(payload: schemas.ImportHomesIn = Body(...), db: Session = Depends(get_db)):
-    db.execute(text("SET LOCAL statement_timeout = 15000"))
+    db.execute(text("SET LOCAL statement_timeout = 30000"))
 
     # 1) Внешний запрос: собираем фильтр только из переданных полей  # NEW
     filt = {"connect_date__gte": payload.connect_date_gte.isoformat()}
@@ -345,24 +347,35 @@ def import_homes(payload: schemas.ImportHomesIn = Body(...), db: Session = Depen
     }
 
     s = requests.Session()
-    a = requests.adapters.HTTPAdapter(max_retries=3)  # 3 повтора при сетевых сбоях/5xx
-    s.mount("http://", a); s.mount("https://", a)
+    s.mount("http://",  HTTPAdapter(max_retries=Retry(total=3, backoff_factor=0.5,
+                                                    status_forcelist=[500,502,503,504])))
+    s.mount("https://", HTTPAdapter(max_retries=Retry(total=3, backoff_factor=0.5,
+                                                    status_forcelist=[500,502,503,504])))
 
+    resp = None
     try:
-        resp = s.post(EXTERNAL_URL, data=form, timeout=60)  # было 30 → стало 60
-        logger.info("external_status=%s", resp.status_code)
+        resp = s.post(EXTERNAL_URL, data=form, timeout=60)  # ↑ было 30 → 60c
+        logger.info("external status=%s", resp.status_code)
         resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        body_preview = None
         try:
-            body_preview = resp.text[:2000] if 'resp' in locals() and resp is not None else None
+            data = resp.json()
+        except ValueError:
+            preview = (resp.text or "")[:1000]
+            logger.error("External returned non-JSON, preview=%r", preview)
+            raise HTTPException(status_code=502, detail="External API returned non-JSON")
+    except requests.Timeout:
+        logger.error("External API timeout (>60s)")
+        raise HTTPException(status_code=504, detail="External API timeout")
+    except Exception as e:
+        # если resp был, сохраним короткий превью тела в лог
+        try:
+            logger.exception("External API error: %s; body=%r", e, (resp.text[:1000] if resp else None))
         except Exception:
-            pass
-            logger.exception("External API error: %s | body=%r", e, body_preview)
-            raise HTTPException(status_code=502, detail=f"External API error: {e}")
+            logger.exception("External API error: %s; body=<unreadable>", e)
+        raise HTTPException(status_code=502, detail="External API error")
 
-    results = data.get("result", []) or []
+    # Гарантированно определяем results
+    results = (data.get("result") if isinstance(data, dict) else None) or []
     total_source = len(results)
     imported = updated = unchanged = skipped = 0
     warnings: list[str] = []

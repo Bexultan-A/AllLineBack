@@ -2,12 +2,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, status
 from sqlalchemy.orm import Session
 from sqlalchemy import case, select, and_, update, func, asc, desc, text
-import json, requests
+import json, requests, logging
 from sqlalchemy.exc import IntegrityError
 from ..db import get_db
 from .. import models, schemas
 
 router = APIRouter(prefix="/main", tags=["main"])
+
+logger = logging.getLogger(__name__)
 
 EXTERNAL_URL = "http://185.13.20.2:8082/rest_api/v2/Homes/"
 
@@ -341,12 +343,24 @@ def import_homes(payload: schemas.ImportHomesIn = Body(...), db: Session = Depen
         "arg1": json.dumps(filt, ensure_ascii=False),
         "fields": json.dumps(["id","settlement","city","street","s_number","s_liter","connect_date"], ensure_ascii=False),
     }
+
+    s = requests.Session()
+    a = requests.adapters.HTTPAdapter(max_retries=3)  # 3 повтора при сетевых сбоях/5xx
+    s.mount("http://", a); s.mount("https://", a)
+
     try:
-        resp = requests.post(EXTERNAL_URL, data=form, timeout=30)
+        resp = s.post(EXTERNAL_URL, data=form, timeout=60)  # было 30 → стало 60
+        logger.info("external_status=%s", resp.status_code)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"External API error: {e}")
+        body_preview = None
+        try:
+            body_preview = resp.text[:2000] if 'resp' in locals() and resp is not None else None
+        except Exception:
+            pass
+            logger.exception("External API error: %s | body=%r", e, body_preview)
+            raise HTTPException(status_code=502, detail=f"External API error: {e}")
 
     results = data.get("result", []) or []
     total_source = len(results)
